@@ -1,4 +1,4 @@
-const defaultOrigins = ['http://localhost:3000', 'http://localhost:3001','https://strangers-play-frontend.onrender.com'];
+require('dotenv').config();
 
 const normalizeOrigins = (value) => {
   if (!value) return [];
@@ -29,15 +29,28 @@ const normalizeOrigins = (value) => {
 const parseOrigins = (...values) => {
   const sources = values.flatMap((value) => normalizeOrigins(value));
 
-  if (sources.length === 0) return defaultOrigins;
+  if (sources.length === 0) return [];
 
   return [...new Set(sources)];
+};
+
+const parseBoolean = (value, fallback = false) => {
+  if (value === undefined || value === null || value === '') return fallback;
+  return ['true', '1', 'yes', 'on'].includes(String(value).trim().toLowerCase());
 };
 
 module.exports = {
   port: Number(process.env.PORT || 4000),
   jwtSecret: process.env.JWT_SECRET || 'strangers-play-secret',
   inviteSecret: process.env.INVITE_SECRET || process.env.JWT_SECRET || 'strangers-play-secret',
-  frontendUrl: process.env.FRONTEND_URL || 'http://localhost:3000',
-  corsOrigins: parseOrigins(process.env.CORS_ORIGINS)
+  frontendUrl: process.env.FRONTEND_URL || '',
+  corsOrigins: parseOrigins(process.env.CORS_ORIGINS, process.env.CORS_ORIGIN, process.env.FRONTEND_URL),
+  statusFeatureEnabled: parseBoolean(process.env.STATUS_FEATURE_ENABLED, true),
+  storageType: (process.env.STORAGE_TYPE || 'local').trim().toLowerCase(),
+  cloudinary: {
+    cloudName: process.env.CLOUDINARY_CLOUD_NAME || '',
+    apiKey: process.env.CLOUDINARY_API_KEY || '',
+    apiSecret: process.env.CLOUDINARY_API_SECRET || '',
+    folder: process.env.CLOUDINARY_FOLDER || 'strangers-play/chat-media'
+  }
 };

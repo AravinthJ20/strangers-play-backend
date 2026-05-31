@@ -12,6 +12,15 @@ const userSchema = new mongoose.Schema({
   connections: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
   connectionRequestsSent: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
   connectionRequestsReceived: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
+  pushSubscriptions: [{
+    endpoint: { type: String, required: true },
+    expirationTime: { type: Date, default: null },
+    keys: {
+      p256dh: { type: String, required: true },
+      auth: { type: String, required: true }
+    },
+    createdAt: { type: Date, default: Date.now }
+  }],
   tokens: [{ token: { type: String, required: true } }],
   createdAt: { type: Date, default: Date.now }
 });

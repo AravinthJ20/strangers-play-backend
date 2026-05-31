@@ -1,4 +1,5 @@
 const User = require('../models/User');
+const VerificationOtp = require('../models/VerificationOtp');
 const jwt = require('jsonwebtoken');
 const { frontendUrl, inviteSecret, jwtSecret } = require('../config/env');
 
@@ -7,70 +8,149 @@ const createInviteToken = ({ inviterId, inviterName, email }) =>
   jwt.sign({ inviterId, inviterName, email }, inviteSecret, { expiresIn: '7d' });
 
 const decodeInviteToken = (inviteToken) => jwt.verify(inviteToken, inviteSecret);
+const createOtp = () => `${Math.floor(100000 + Math.random() * 900000)}`;
+const OTP_EXPIRY_MINUTES = 10;
 
-const createInviteTransport = () => {
+const createMailTransport = () => {
   const smtpHost = process.env.SMTP_HOST;
   const smtpPort = process.env.SMTP_PORT;
   const smtpUser = process.env.SMTP_USER;
   const smtpPass = process.env.SMTP_PASS;
-  const allowSelfSigned = process.env.SMTP_ALLOW_SELF_SIGNED === 'true';
 
   if (!smtpHost || !smtpPort || !smtpUser || !smtpPass) {
-    throw new Error('Invite email is not configured. Set SMTP_HOST, SMTP_PORT, SMTP_USER, and SMTP_PASS.');
+    return null;
   }
 
-  // Lazy load so the server can still boot even before dependencies are installed.
-  // eslint-disable-next-line global-require, import/no-dynamic-require
   const nodemailer = require('nodemailer');
 
-  // return nodemailer.createTransport({
-  //   host: smtpHost,
-  //   port: Number(smtpPort),
-  //   secure: Number(smtpPort) === 465,
-  //   auth: {
-  //     user: smtpUser,
-  //     pass: smtpPass
-  //   },
-  //   tls: allowSelfSigned
-  //     ? {
-  //         rejectUnauthorized: false
-  //       }
-  //     : undefined
-  // });
-return nodemailer.createTransport({
-  host: smtpHost,
-  port: Number(smtpPort),
-  secure: false,
-  auth: {
-    user: smtpUser,
-    pass: smtpPass
-  },
-  tls: {
-    rejectUnauthorized: false
-  }
-});
+  return nodemailer.createTransport({
+    host: smtpHost,
+    port: Number(smtpPort),
+    secure: Number(smtpPort) === 465,
+    auth: {
+      user: smtpUser,
+      pass: smtpPass
+    },
+    tls: process.env.SMTP_ALLOW_SELF_SIGNED === 'true'
+      ? { rejectUnauthorized: false }
+      : undefined
+  });
 };
 
-exports.register = async (req, res) => {
+const sendOtpEmail = async ({ email, subject, headline, body, otp }) => {
+  const transport = createMailTransport();
+  console.log(`OTP for ${email}: ${otp}`);
+
+  if (!transport) {
+    return { delivered: false };
+  }
+
+  await transport.sendMail({
+    from: process.env.SMTP_FROM || process.env.SMTP_USER,
+    to: email,
+    subject,
+    text: `${body}\nOTP: ${otp}\nThis OTP expires in ${OTP_EXPIRY_MINUTES} minutes.`,
+    html: `
+      <div style="font-family:Segoe UI,Arial,sans-serif;line-height:1.5;color:#14213d">
+        <h2 style="margin-bottom:12px;">${headline}</h2>
+        <p>${body}</p>
+        <div style="display:inline-block;padding:14px 18px;border-radius:14px;background:#edf6f9;border:1px solid #dfe9ee;font-size:28px;font-weight:800;letter-spacing:0.22em;">
+          ${otp}
+        </div>
+        <p style="margin-top:14px;">This OTP expires in ${OTP_EXPIRY_MINUTES} minutes.</p>
+      </div>
+    `
+  });
+
+  return { delivered: true };
+};
+
+const sanitizeUser = (user) => {
+  const userData = user.toObject();
+  delete userData.password;
+  delete userData.tokens;
+  return userData;
+};
+
+exports.requestRegistrationOtp = async (req, res) => {
   try {
     const { username, email, password, inviteToken } = req.body;
-    if (!username || !email || !password) return res.status(400).json({ error: 'Missing fields' });
+    if (!username || !email || !password) {
+      return res.status(400).json({ error: 'Missing fields' });
+    }
 
+    const normalizedEmail = email.toLowerCase().trim();
     let invitePayload = null;
     if (inviteToken) {
       invitePayload = decodeInviteToken(inviteToken);
-      if (invitePayload.email.toLowerCase() !== email.toLowerCase()) {
+      if (invitePayload.email.toLowerCase() !== normalizedEmail) {
         return res.status(400).json({ error: 'Invite email does not match registration email' });
       }
     }
 
-    const existing = await User.findOne({ $or: [{ username }, { email }] });
+    const existing = await User.findOne({ $or: [{ username: username.trim() }, { email: normalizedEmail }] });
     if (existing) return res.status(400).json({ error: 'User already exists' });
 
-    const user = new User({ username, email, password });
+    const otp = createOtp();
+    await VerificationOtp.deleteMany({ purpose: 'register', email: normalizedEmail });
+    await VerificationOtp.create({
+      purpose: 'register',
+      email: normalizedEmail,
+      otp,
+      expiresAt: new Date(Date.now() + OTP_EXPIRY_MINUTES * 60 * 1000),
+      payload: {
+        username: username.trim(),
+        password,
+        inviteToken: inviteToken || ''
+      }
+    });
+
+    const mailStatus = await sendOtpEmail({
+      email: normalizedEmail,
+      subject: 'Your Strangers Play registration OTP',
+      headline: 'Verify your email to create your account',
+      body: 'Use this one-time password to complete your Strangers Play registration.',
+      otp
+    });
+
+    res.json({
+      message: mailStatus.delivered
+        ? 'OTP sent to your email'
+        : 'OTP generated. Email delivery is not configured, so check the server console for the OTP.'
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message || 'Unable to send registration OTP' });
+  }
+};
+
+exports.register = async (req, res) => {
+  try {
+    const { email, otp } = req.body;
+    if (!email || !otp) return res.status(400).json({ error: 'Email and OTP are required' });
+
+    const normalizedEmail = email.toLowerCase().trim();
+    const verification = await VerificationOtp.findOne({ purpose: 'register', email: normalizedEmail, otp });
+    if (!verification || verification.expiresAt.getTime() < Date.now()) {
+      return res.status(400).json({ error: 'OTP is invalid or expired' });
+    }
+
+    const { username, password, inviteToken } = verification.payload;
+    let invitePayload = null;
+    if (inviteToken) {
+      invitePayload = decodeInviteToken(inviteToken);
+      if (invitePayload.email.toLowerCase() !== normalizedEmail) {
+        return res.status(400).json({ error: 'Invite email does not match registration email' });
+      }
+    }
+
+    const existing = await User.findOne({ $or: [{ username }, { email: normalizedEmail }] });
+    if (existing) return res.status(400).json({ error: 'User already exists' });
+
+    const user = new User({ username, email: normalizedEmail, password });
     const token = createToken(user._id);
     user.tokens = [{ token }];
     await user.save();
+    await VerificationOtp.deleteMany({ purpose: 'register', email: normalizedEmail });
 
     if (invitePayload?.inviterId) {
       const inviter = await User.findById(invitePayload.inviterId);
@@ -89,11 +169,7 @@ exports.register = async (req, res) => {
       }
     }
 
-    const userData = user.toObject();
-    delete userData.password;
-    delete userData.tokens;
-
-    res.status(201).json({ user: userData, token });
+    res.status(201).json({ user: sanitizeUser(user), token });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
@@ -112,11 +188,7 @@ exports.login = async (req, res) => {
     user.tokens.push({ token });
     await user.save();
 
-    const userData = user.toObject();
-    delete userData.password;
-    delete userData.tokens;
-
-    res.json({ user: userData, token });
+    res.json({ user: sanitizeUser(user), token });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
@@ -133,10 +205,7 @@ exports.logout = async (req, res) => {
 };
 
 exports.getMe = async (req, res) => {
-  const userData = req.user.toObject();
-  delete userData.password;
-  delete userData.tokens;
-  res.json(userData);
+  res.json(sanitizeUser(req.user));
 };
 
 exports.sendInvite = async (req, res) => {
@@ -156,7 +225,10 @@ exports.sendInvite = async (req, res) => {
       email: normalizedEmail
     });
     const inviteLink = `${frontendUrl}/register?invite=${encodeURIComponent(inviteToken)}`;
-    const transport = createInviteTransport();
+    const transport = createMailTransport();
+    if (!transport) {
+      return res.status(500).json({ error: 'Invite email is not configured. Set SMTP_HOST, SMTP_PORT, SMTP_USER, and SMTP_PASS.' });
+    }
 
     await transport.sendMail({
       from: process.env.SMTP_FROM || process.env.SMTP_USER,
@@ -181,6 +253,69 @@ exports.sendInvite = async (req, res) => {
     res.json({ message: 'Invite sent successfully' });
   } catch (error) {
     res.status(500).json({ error: error.message || 'Unable to send invite' });
+  }
+};
+
+exports.requestPasswordResetOtp = async (req, res) => {
+  try {
+    const { email } = req.body;
+    if (!email) return res.status(400).json({ error: 'Email is required' });
+
+    const normalizedEmail = email.toLowerCase().trim();
+    const user = await User.findOne({ email: normalizedEmail });
+    if (!user) return res.status(400).json({ error: 'No account found for this email' });
+
+    const otp = createOtp();
+    await VerificationOtp.deleteMany({ purpose: 'reset-password', email: normalizedEmail });
+    await VerificationOtp.create({
+      purpose: 'reset-password',
+      email: normalizedEmail,
+      otp,
+      expiresAt: new Date(Date.now() + OTP_EXPIRY_MINUTES * 60 * 1000)
+    });
+
+    const mailStatus = await sendOtpEmail({
+      email: normalizedEmail,
+      subject: 'Your Strangers Play password reset OTP',
+      headline: 'Reset your Strangers Play password',
+      body: 'Use this one-time password to continue resetting your password.',
+      otp
+    });
+
+    res.json({
+      message: mailStatus.delivered
+        ? 'Password reset OTP sent to your email'
+        : 'Password reset OTP generated. Email delivery is not configured, so check the server console for the OTP.'
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message || 'Unable to send reset OTP' });
+  }
+};
+
+exports.resetPassword = async (req, res) => {
+  try {
+    const { email, otp, password } = req.body;
+    if (!email || !otp || !password) {
+      return res.status(400).json({ error: 'Email, OTP, and new password are required' });
+    }
+
+    const normalizedEmail = email.toLowerCase().trim();
+    const verification = await VerificationOtp.findOne({ purpose: 'reset-password', email: normalizedEmail, otp });
+    if (!verification || verification.expiresAt.getTime() < Date.now()) {
+      return res.status(400).json({ error: 'OTP is invalid or expired' });
+    }
+
+    const user = await User.findOne({ email: normalizedEmail });
+    if (!user) return res.status(404).json({ error: 'User not found' });
+
+    user.password = password;
+    user.tokens = [];
+    await user.save();
+    await VerificationOtp.deleteMany({ purpose: 'reset-password', email: normalizedEmail });
+
+    res.json({ message: 'Password reset successful. Please log in with your new password.' });
+  } catch (error) {
+    res.status(500).json({ error: error.message || 'Unable to reset password' });
   }
 };
 

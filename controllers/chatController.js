@@ -2,9 +2,7 @@ const Message = require('../models/Message');
 const Group = require('../models/Group');
 const User = require('../models/User');
 const ChatMedia = require('../models/ChatMedia');
-const fs = require('fs');
-const path = require('path');
-const crypto = require('crypto');
+const { uploadMediaBuffer } = require('../utils/mediaStorage');
 
 const isConnected = async (userId, otherUserId) => {
   const user = await User.findById(userId).select('connections');
@@ -13,10 +11,25 @@ const isConnected = async (userId, otherUserId) => {
 
 const populateMessageDetails = (query) => query.populate('sender', 'username avatar').populate('attachments');
 
-const uploadsRoot = path.join(__dirname, '..', 'uploads', 'chat-media');
+const canAccessMessage = async (message, userId) => {
+  if (!message) return false;
 
-const ensureUploadsDir = async () => {
-  await fs.promises.mkdir(uploadsRoot, { recursive: true });
+  if (message.group) {
+    const group = await Group.findOne({ _id: message.group, members: userId }).select('_id');
+    return Boolean(group);
+  }
+
+  if (!message.recipient) return false;
+  return [message.sender.toString(), message.recipient.toString()].includes(userId.toString());
+};
+
+const sanitizeDeletedMessage = (message) => {
+  message.content = '';
+  message.sticker = '';
+  message.attachments = [];
+  message.location = undefined;
+  message.type = 'text';
+  message.editedAt = null;
 };
 
 exports.uploadMedia = async (req, res) => {
@@ -37,23 +50,25 @@ exports.uploadMedia = async (req, res) => {
     }
 
     const buffer = Buffer.from(base64Data, 'base64');
-    const extension = path.extname(fileName) || '';
-    const generatedName = `${Date.now()}-${crypto.randomBytes(6).toString('hex')}${extension}`;
     const category = mimeType.startsWith('image/') ? 'image' : 'file';
-
-    await ensureUploadsDir();
-
-    const absolutePath = path.join(uploadsRoot, generatedName);
-    await fs.promises.writeFile(absolutePath, buffer);
+    const storedFile = await uploadMediaBuffer({
+      fileName,
+      mimeType,
+      buffer,
+      category
+    });
 
     const media = await ChatMedia.create({
       owner: req.user._id,
-      fileName: generatedName,
+      storageType: storedFile.storageType,
+      bucketType: storedFile.bucketType || storedFile.storageType,
+      storageId: storedFile.storageId,
+      fileName: storedFile.fileName,
       originalName: fileName,
-      mimeType,
+      mimeType: storedFile.mimeType,
       size: buffer.length,
-      storagePath: absolutePath,
-      publicUrl: `/uploads/chat-media/${generatedName}`,
+      storagePath: storedFile.storagePath,
+      publicUrl: storedFile.publicUrl,
       category
     });
 
@@ -124,6 +139,93 @@ exports.markAsRead = async (req, res) => {
     if (!message.readBy.includes(req.user._id)) message.readBy.push(req.user._id);
     await message.save();
     res.json(message);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+};
+
+exports.editMessage = async (req, res) => {
+  try {
+    const { content } = req.body;
+    const trimmedContent = (content || '').trim();
+    const message = await Message.findById(req.params.messageId);
+
+    if (!message) return res.status(404).json({ error: 'Message not found' });
+    if (message.sender.toString() !== req.user._id.toString()) {
+      return res.status(403).json({ error: 'Only the sender can edit this message' });
+    }
+    if (message.isDeleted || message.type === 'call' || message.type === 'location' || message.location) {
+      return res.status(400).json({ error: 'This message cannot be edited' });
+    }
+    if (!trimmedContent && (!Array.isArray(message.attachments) || message.attachments.length === 0) && !message.sticker) {
+      return res.status(400).json({ error: 'Message content cannot be empty' });
+    }
+
+    message.content = trimmedContent;
+    message.editedAt = new Date();
+    await message.save();
+
+    const updatedMessage = await populateMessageDetails(Message.findById(message._id));
+    res.json(updatedMessage);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+};
+
+exports.deleteMessage = async (req, res) => {
+  try {
+    const message = await Message.findById(req.params.messageId);
+
+    if (!message) return res.status(404).json({ error: 'Message not found' });
+    if (message.sender.toString() !== req.user._id.toString()) {
+      return res.status(403).json({ error: 'Only the sender can delete this message' });
+    }
+    if (message.type === 'call') {
+      return res.status(400).json({ error: 'Call history cannot be deleted' });
+    }
+
+    message.isDeleted = true;
+    message.deletedAt = new Date();
+    message.reactions = [];
+    sanitizeDeletedMessage(message);
+    await message.save();
+
+    const updatedMessage = await populateMessageDetails(Message.findById(message._id));
+    res.json(updatedMessage);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+};
+
+exports.reactToMessage = async (req, res) => {
+  try {
+    const { value } = req.body;
+    if (!['like', 'dislike'].includes(value)) {
+      return res.status(400).json({ error: 'Invalid reaction' });
+    }
+
+    const message = await Message.findById(req.params.messageId);
+    if (!message) return res.status(404).json({ error: 'Message not found' });
+
+    const canAccess = await canAccessMessage(message, req.user._id);
+    if (!canAccess) return res.status(403).json({ error: 'Not authorized to react to this message' });
+    if (message.isDeleted || message.type === 'call') {
+      return res.status(400).json({ error: 'This message cannot be reacted to' });
+    }
+
+    const existingReaction = message.reactions.find((reaction) => reaction.user.toString() === req.user._id.toString());
+    if (existingReaction?.value === value) {
+      message.reactions = message.reactions.filter((reaction) => reaction.user.toString() !== req.user._id.toString());
+    } else if (existingReaction) {
+      existingReaction.value = value;
+    } else {
+      message.reactions.push({ user: req.user._id, value });
+    }
+
+    await message.save();
+
+    const updatedMessage = await populateMessageDetails(Message.findById(message._id));
+    res.json(updatedMessage);
   } catch (error) {
     res.status(500).json({ error: error.message });
   }

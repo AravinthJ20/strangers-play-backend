@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const auth = require('../utils/auth');
 const User = require('../models/User');
+const { sanitizeSubscription } = require('../utils/push');
 
 const publicFields = 'username email avatar online lastSeen connections connectionRequestsSent connectionRequestsReceived';
 
@@ -64,6 +65,16 @@ router.get('/search', auth, async (req, res) => {
       _id: { $ne: req.user._id }
     }).select('username email avatar online lastSeen');
 
+    res.json(users.map((user) => serializeUser(user, currentUser)));
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+router.get('/discover', auth, async (req, res) => {
+  try {
+    const currentUser = await User.findById(req.user._id).select(publicFields);
+    const users = await User.find({ _id: { $ne: req.user._id } }).select('username email avatar online lastSeen');
     res.json(users.map((user) => serializeUser(user, currentUser)));
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -153,6 +164,44 @@ router.post('/connections/:userId/reject', auth, async (req, res) => {
 
     await Promise.all([currentUser.save(), targetUser.save()]);
     res.json({ status: 'rejected' });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+router.post('/push/subscribe', auth, async (req, res) => {
+  try {
+    const subscription = sanitizeSubscription(req.body.subscription);
+    if (!subscription) {
+      return res.status(400).json({ error: 'Invalid push subscription payload' });
+    }
+
+    const existing = req.user.pushSubscriptions.some((entry) => entry.endpoint === subscription.endpoint);
+    if (!existing) {
+      req.user.pushSubscriptions.push(subscription);
+    } else {
+      req.user.pushSubscriptions = req.user.pushSubscriptions.map((entry) =>
+        entry.endpoint === subscription.endpoint ? subscription : entry
+      );
+    }
+
+    await req.user.save();
+    res.json({ status: 'subscribed' });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+router.post('/push/unsubscribe', auth, async (req, res) => {
+  try {
+    const endpoint = req.body.endpoint;
+    if (!endpoint) {
+      return res.status(400).json({ error: 'Endpoint is required' });
+    }
+
+    req.user.pushSubscriptions = req.user.pushSubscriptions.filter((entry) => entry.endpoint !== endpoint);
+    await req.user.save();
+    res.json({ status: 'unsubscribed' });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }

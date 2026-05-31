@@ -3,6 +3,7 @@ const User = require('../models/User');
 const Message = require('../models/Message');
 const Group = require('../models/Group');
 const ChatMedia = require('../models/ChatMedia');
+const { sendPushNotification } = require('../utils/push');
 const JWT_SECRET = process.env.JWT_SECRET || 'strangers-play-secret';
 
 const hasConnection = async (userId, otherUserId) => {
@@ -10,11 +11,13 @@ const hasConnection = async (userId, otherUserId) => {
   return user?.connections.some((entry) => entry.toString() === otherUserId.toString());
 };
 
-const determineMessageType = ({ content, sticker, attachments }) => {
+const determineMessageType = ({ content, sticker, attachments, location }) => {
   const hasContent = Boolean(content?.trim());
   const hasSticker = Boolean(sticker?.trim());
   const hasAttachments = Array.isArray(attachments) && attachments.length > 0;
+  const hasLocation = Number.isFinite(location?.latitude) && Number.isFinite(location?.longitude);
 
+  if (hasLocation) return 'location';
   if (hasSticker) return 'sticker';
   if (hasAttachments && hasContent) return 'mixed';
   if (hasAttachments) {
@@ -46,6 +49,76 @@ const populateMessageDetails = async (message) => {
   ]);
 
   return message;
+};
+
+const canAccessMessage = async (message, userId) => {
+  if (!message) return false;
+
+  if (message.group) {
+    const group = await Group.findOne({ _id: message.group, members: userId }).select('_id');
+    return Boolean(group);
+  }
+
+  if (!message.recipient) return false;
+  return [message.sender.toString(), message.recipient.toString()].includes(userId.toString());
+};
+
+const sanitizeDeletedMessage = (message) => {
+  message.content = '';
+  message.sticker = '';
+  message.attachments = [];
+  message.location = undefined;
+  message.type = 'text';
+  message.editedAt = null;
+};
+
+const emitMessageMutation = (io, message, eventName, payload) => {
+  if (message.group) {
+    io.to(message.group.toString()).emit(eventName, payload);
+    return;
+  }
+
+  if (message.recipient) {
+    io.to(message.sender.toString()).emit(eventName, payload);
+    io.to(message.recipient.toString()).emit(eventName, payload);
+  }
+};
+
+const buildCallSummary = (callDetails) => {
+  const modeLabel = callDetails.mode === 'video' ? 'Video' : 'Voice';
+  if (callDetails.status === 'completed') {
+    const durationLabel = callDetails.durationSeconds > 0 ? ` (${callDetails.durationSeconds}s)` : '';
+    return `${modeLabel} call completed${durationLabel}`;
+  }
+  if (callDetails.status === 'rejected') return `${modeLabel} call rejected`;
+  if (callDetails.status === 'cancelled') return `${modeLabel} call cancelled`;
+  return `${modeLabel} call missed`;
+};
+
+const createCallHistoryMessage = async ({ callerId, recipientId, mode, status, startedAt, endedAt }) => {
+  const durationSeconds =
+    startedAt && endedAt && status === 'completed'
+      ? Math.max(0, Math.round((new Date(endedAt).getTime() - new Date(startedAt).getTime()) / 1000))
+      : 0;
+
+  const message = new Message({
+    sender: callerId,
+    recipient: recipientId,
+    type: 'call',
+    content: buildCallSummary({ mode, status, durationSeconds }),
+    callDetails: {
+      mode,
+      status,
+      durationSeconds,
+      startedAt,
+      endedAt
+    },
+    status: 'read',
+    readBy: [callerId, recipientId]
+  });
+
+  await message.save();
+  return populateMessageDetails(message);
 };
 
 module.exports = (io) => {
@@ -82,7 +155,7 @@ module.exports = (io) => {
       }
     });
 
-    socket.on('personal-message', async ({ recipientId, content = '', tempId, attachmentIds = [], sticker = '' }) => {
+    socket.on('personal-message', async ({ recipientId, content = '', tempId, attachmentIds = [], sticker = '', location = null }) => {
       if (!(await hasConnection(user._id, recipientId))) {
         socket.emit('message-error', { tempId, error: 'You can only message accepted connections.' });
         return;
@@ -101,8 +174,9 @@ module.exports = (io) => {
         recipient: recipientId,
         content,
         sticker,
+        location,
         attachments: attachments.map((entry) => entry._id),
-        type: determineMessageType({ content, sticker, attachments }),
+        type: determineMessageType({ content, sticker, attachments, location }),
         status: 'sent'
       });
       await message.save();
@@ -118,12 +192,18 @@ module.exports = (io) => {
 
       io.to(recipientId).emit('new-message', populatedMessage);
       socket.emit('message-sent', { tempId, messageId: message._id.toString(), message: populatedMessage });
+      await sendPushNotification(recipient, {
+        title: user.username,
+        body: content || sticker || (location ? 'Shared a location' : (attachments.length > 0 ? 'Sent an attachment' : 'New message')),
+        tag: `message-${message._id}`,
+        url: '/chat'
+      });
       if (delivered) {
         socket.emit('message-delivered', { messageId: message._id, status: 'delivered' });
       }
     });
 
-    socket.on('group-message', async ({ groupId, content = '', tempId, attachmentIds = [], sticker = '' }) => {
+    socket.on('group-message', async ({ groupId, content = '', tempId, attachmentIds = [], sticker = '', location = null }) => {
       const group = await Group.findById(groupId);
       if (!group || !group.members.some((member) => member.toString() === user._id.toString())) return;
 
@@ -140,8 +220,9 @@ module.exports = (io) => {
         group: groupId,
         content,
         sticker,
+        location,
         attachments: attachments.map((entry) => entry._id),
-        type: determineMessageType({ content, sticker, attachments }),
+        type: determineMessageType({ content, sticker, attachments, location }),
         status: 'sent'
       });
       await message.save();
@@ -149,6 +230,110 @@ module.exports = (io) => {
 
       socket.to(groupId).emit('new-group-message', populatedMessage);
       socket.emit('message-sent', { tempId, messageId: message._id.toString(), message: populatedMessage });
+    });
+
+    socket.on('edit-message', async ({ messageId, content = '' }) => {
+      try {
+        const trimmedContent = content.trim();
+        const message = await Message.findById(messageId);
+
+        if (!message) {
+          socket.emit('message-error', { error: 'Message not found.' });
+          return;
+        }
+        if (message.sender.toString() !== user._id.toString()) {
+          socket.emit('message-error', { error: 'Only the sender can edit this message.' });
+          return;
+        }
+        if (message.isDeleted || message.type === 'call' || message.type === 'location' || message.location) {
+          socket.emit('message-error', { error: 'This message cannot be edited.' });
+          return;
+        }
+        if (!trimmedContent && (!Array.isArray(message.attachments) || message.attachments.length === 0) && !message.sticker) {
+          socket.emit('message-error', { error: 'Message content cannot be empty.' });
+          return;
+        }
+
+        message.content = trimmedContent;
+        message.editedAt = new Date();
+        await message.save();
+
+        const populatedMessage = await populateMessageDetails(message);
+        emitMessageMutation(io, message, 'message-updated', populatedMessage);
+      } catch (error) {
+        socket.emit('message-error', { error: 'Unable to edit message.' });
+      }
+    });
+
+    socket.on('delete-message', async ({ messageId }) => {
+      try {
+        const message = await Message.findById(messageId);
+
+        if (!message) {
+          socket.emit('message-error', { error: 'Message not found.' });
+          return;
+        }
+        if (message.sender.toString() !== user._id.toString()) {
+          socket.emit('message-error', { error: 'Only the sender can delete this message.' });
+          return;
+        }
+        if (message.type === 'call') {
+          socket.emit('message-error', { error: 'Call history cannot be deleted.' });
+          return;
+        }
+
+        message.isDeleted = true;
+        message.deletedAt = new Date();
+        message.reactions = [];
+        sanitizeDeletedMessage(message);
+        await message.save();
+
+        const populatedMessage = await populateMessageDetails(message);
+        emitMessageMutation(io, message, 'message-deleted', populatedMessage);
+      } catch (error) {
+        socket.emit('message-error', { error: 'Unable to delete message.' });
+      }
+    });
+
+    socket.on('toggle-message-reaction', async ({ messageId, value }) => {
+      try {
+        if (!['like', 'dislike'].includes(value)) {
+          socket.emit('message-error', { error: 'Invalid reaction.' });
+          return;
+        }
+
+        const message = await Message.findById(messageId);
+        if (!message) {
+          socket.emit('message-error', { error: 'Message not found.' });
+          return;
+        }
+
+        const canAccess = await canAccessMessage(message, user._id);
+        if (!canAccess) {
+          socket.emit('message-error', { error: 'Not authorized to react to this message.' });
+          return;
+        }
+        if (message.isDeleted || message.type === 'call') {
+          socket.emit('message-error', { error: 'This message cannot be reacted to.' });
+          return;
+        }
+
+        const existingReaction = message.reactions.find((reaction) => reaction.user.toString() === user._id.toString());
+        if (existingReaction?.value === value) {
+          message.reactions = message.reactions.filter((reaction) => reaction.user.toString() !== user._id.toString());
+        } else if (existingReaction) {
+          existingReaction.value = value;
+        } else {
+          message.reactions.push({ user: user._id, value });
+        }
+
+        await message.save();
+
+        const populatedMessage = await populateMessageDetails(message);
+        emitMessageMutation(io, message, 'message-reaction-updated', populatedMessage);
+      } catch (error) {
+        socket.emit('message-error', { error: 'Unable to update reaction.' });
+      }
     });
 
     socket.on('mark-as-read', async ({ chatUserId, senderId, messageIds }) => {
@@ -224,7 +409,9 @@ module.exports = (io) => {
         callerId: user._id.toString(),
         recipientId: recipientId.toString(),
         type,
-        offer: offer || null
+        offer: offer || null,
+        requestedAt: new Date(),
+        answeredAt: null
       });
 
       io.to(recipient.socketId).emit('call-request', {
@@ -237,10 +424,21 @@ module.exports = (io) => {
         type,
         offer: offer || null
       });
+
+      await sendPushNotification(recipient, {
+        title: `${user.username} is calling`,
+        body: `${type === 'video' ? 'Video' : 'Voice'} call incoming`,
+        tag: `call-${callId}`,
+        url: '/chat'
+      });
     });
 
     socket.on('call-answer', async ({ recipientId, callId, answer }) => {
       if (!recipientId || !callId) return;
+      const activeCall = activeCalls.get(callId);
+      if (activeCall) {
+        activeCall.answeredAt = new Date();
+      }
 
       const recipient = await User.findById(recipientId);
       if (!recipient?.socketId) return;
@@ -260,21 +458,52 @@ module.exports = (io) => {
     socket.on('call-rejected', async ({ recipientId, callId }) => {
       if (!recipientId || !callId) return;
 
+      const activeCall = activeCalls.get(callId);
       activeCalls.delete(callId);
       const recipient = await User.findById(recipientId);
-      if (!recipient?.socketId) return;
+      if (recipient?.socketId) {
+        io.to(recipient.socketId).emit('call-rejected', { callId });
+      }
 
-      io.to(recipient.socketId).emit('call-rejected', { callId });
+      if (activeCall) {
+        const historyMessage = await createCallHistoryMessage({
+          callerId: activeCall.callerId,
+          recipientId: activeCall.recipientId,
+          mode: activeCall.type,
+          status: 'rejected',
+          startedAt: activeCall.requestedAt,
+          endedAt: new Date()
+        });
+
+        io.to(activeCall.callerId).emit('call-history', historyMessage);
+        io.to(activeCall.recipientId).emit('call-history', historyMessage);
+      }
     });
 
     socket.on('call-ended', async ({ recipientId, callId }) => {
       if (!recipientId || !callId) return;
 
+      const activeCall = activeCalls.get(callId);
       activeCalls.delete(callId);
       const recipient = await User.findById(recipientId);
-      if (!recipient?.socketId) return;
+      if (recipient?.socketId) {
+        io.to(recipient.socketId).emit('call-ended', { callId });
+      }
 
-      io.to(recipient.socketId).emit('call-ended', { callId });
+      if (activeCall) {
+        const endedAt = new Date();
+        const historyMessage = await createCallHistoryMessage({
+          callerId: activeCall.callerId,
+          recipientId: activeCall.recipientId,
+          mode: activeCall.type,
+          status: activeCall.answeredAt ? 'completed' : 'missed',
+          startedAt: activeCall.answeredAt || activeCall.requestedAt,
+          endedAt
+        });
+
+        io.to(activeCall.callerId).emit('call-history', historyMessage);
+        io.to(activeCall.recipientId).emit('call-history', historyMessage);
+      }
     });
 
     socket.on('get-call-offer', ({ callId }, callback) => {

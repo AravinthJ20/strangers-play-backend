@@ -1,13 +1,13 @@
+require('dotenv').config();
+
 const express = require('express');
 const http = require('http');
 const cors = require('cors');
 const path = require('path');
 const socketIo = require('socket.io');
 const connectDB = require('./config/db');
-const { corsOrigins, port } = require('./config/env');
+const { corsOrigins, port, statusFeatureEnabled } = require('./config/env');
 const socketManager = require('./socket/socketManager');
-
-require('dotenv').config();
 
 const app = express();
 const corsOptions = {
@@ -30,6 +30,9 @@ app.use('/api/auth', require('./routes/auth'));
 app.use('/api/users', require('./routes/user'));
 app.use('/api/chat', require('./routes/chat'));
 app.use('/api/groups', require('./routes/group'));
+if (statusFeatureEnabled) {
+  app.use('/api/status', require('./routes/status'));
+}
 
 socketManager(io);
 
