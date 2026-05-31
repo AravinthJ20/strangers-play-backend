@@ -39,5 +39,5 @@ module.exports = {
   jwtSecret: process.env.JWT_SECRET || 'strangers-play-secret',
   inviteSecret: process.env.INVITE_SECRET || process.env.JWT_SECRET || 'strangers-play-secret',
   frontendUrl: process.env.FRONTEND_URL || 'http://localhost:3000',
-  corsOrigins: parseOrigins(process.env.CORS_ORIGINS, process.env.CORS_ORIGIN, process.env.FRONTEND_URL || 'http://localhost:3000')
+  corsOrigins: parseOrigins(process.env.CORS_ORIGINS)
 };
