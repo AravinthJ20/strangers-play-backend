@@ -26,6 +26,7 @@ const messageSchema = new mongoose.Schema({
     startedAt: { type: Date },
     endedAt: { type: Date }
   },
+  mentions: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
   status: { type: String, enum: ['sent', 'delivered', 'read'], default: 'sent' },
   timestamp: { type: Date, default: Date.now },
   readBy: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],

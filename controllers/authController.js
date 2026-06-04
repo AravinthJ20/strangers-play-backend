@@ -2,6 +2,7 @@ const User = require('../models/User');
 const VerificationOtp = require('../models/VerificationOtp');
 const jwt = require('jsonwebtoken');
 const { frontendUrl, inviteSecret, jwtSecret } = require('../config/env');
+const { createMailTransport } = require('../utils/mail');
 
 const createToken = (id) => jwt.sign({ _id: id.toString() }, jwtSecret, { expiresIn: '30d' });
 const createInviteToken = ({ inviterId, inviterName, email }) =>
@@ -10,32 +11,6 @@ const createInviteToken = ({ inviterId, inviterName, email }) =>
 const decodeInviteToken = (inviteToken) => jwt.verify(inviteToken, inviteSecret);
 const createOtp = () => `${Math.floor(100000 + Math.random() * 900000)}`;
 const OTP_EXPIRY_MINUTES = 10;
-
-const createMailTransport = () => {
-  const smtpHost = process.env.SMTP_HOST;
-  const smtpPort = process.env.SMTP_PORT;
-  const smtpUser = process.env.SMTP_USER;
-  const smtpPass = process.env.SMTP_PASS;
-
-  if (!smtpHost || !smtpPort || !smtpUser || !smtpPass) {
-    return null;
-  }
-
-  const nodemailer = require('nodemailer');
-
-  return nodemailer.createTransport({
-    host: smtpHost,
-    port: Number(smtpPort),
-    secure: Number(smtpPort) === 465,
-    auth: {
-      user: smtpUser,
-      pass: smtpPass
-    },
-    tls: process.env.SMTP_ALLOW_SELF_SIGNED === 'true'
-      ? { rejectUnauthorized: false }
-      : undefined
-  });
-};
 
 const sendOtpEmail = async ({ email, subject, headline, body, otp }) => {
   const transport = createMailTransport();

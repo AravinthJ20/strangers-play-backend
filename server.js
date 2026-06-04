@@ -8,6 +8,7 @@ const socketIo = require('socket.io');
 const connectDB = require('./config/db');
 const { corsOrigins, port, statusFeatureEnabled } = require('./config/env');
 const socketManager = require('./socket/socketManager');
+const { startRequestReminderCron } = require('./utils/requestReminderCron');
 
 const app = express();
 const corsOptions = {
@@ -35,6 +36,7 @@ if (statusFeatureEnabled) {
 }
 
 socketManager(io);
+startRequestReminderCron();
 
 app.get('/', (req, res) => {
   res.json({ message: 'Strangers Play backend is running' });

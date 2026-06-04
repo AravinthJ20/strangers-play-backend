@@ -11,6 +11,15 @@ const isConnected = async (userId, otherUserId) => {
 
 const populateMessageDetails = (query) => query.populate('sender', 'username avatar').populate('attachments');
 
+const parsePagination = (query) => {
+  const limit = Math.min(Math.max(Number(query.limit) || 30, 1), 100);
+  const before = query.before ? new Date(query.before) : null;
+  return {
+    limit,
+    before: before && !Number.isNaN(before.getTime()) ? before : null
+  };
+};
+
 const canAccessMessage = async (message, userId) => {
   if (!message) return false;
 
@@ -118,15 +127,36 @@ exports.getPersonalMessages = async (req, res) => {
       return res.status(403).json({ error: 'Direct chat is only available for accepted connections' });
     }
 
-    const messages = await populateMessageDetails(Message.find({
+    const { limit, before } = parsePagination(req.query);
+    const filter = {
       $or: [
         { sender: req.user._id, recipient: userId },
         { sender: userId, recipient: req.user._id }
       ],
       group: { $exists: false }
-    }).sort({ timestamp: 1 }));
+    };
 
-    res.json(messages);
+    if (before) {
+      filter.timestamp = { $lt: before };
+    }
+
+    const messages = await populateMessageDetails(
+      Message.find(filter)
+        .sort({ timestamp: -1, _id: -1 })
+        .limit(limit + 1)
+    );
+
+    const hasMore = messages.length > limit;
+    const pagedMessages = (hasMore ? messages.slice(0, limit) : messages).reverse();
+    const nextCursor = hasMore ? pagedMessages[0]?.timestamp || null : null;
+
+    res.json({
+      messages: pagedMessages,
+      pageInfo: {
+        hasMore,
+        nextCursor
+      }
+    });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }

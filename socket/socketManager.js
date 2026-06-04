@@ -5,7 +5,10 @@ const Group = require('../models/Group');
 const ChatMedia = require('../models/ChatMedia');
 const { sendPushNotification } = require('../utils/push');
 const JWT_SECRET = process.env.JWT_SECRET || 'strangers-play-secret';
-
+  // const crypto=require("crypto")
+  // const getSecretRoomId=({Id})=>{
+  //  return crypto.createHash("sha256").update([Id].sort().join('_')).digest("hex")
+  // }
 const hasConnection = async (userId, otherUserId) => {
   const user = await User.findById(userId).select('connections');
   return user?.connections.some((entry) => entry.toString() === otherUserId.toString());
@@ -45,10 +48,29 @@ const hydrateAttachments = async (attachmentIds, ownerId) => {
 const populateMessageDetails = async (message) => {
   await message.populate([
     { path: 'sender', select: 'username avatar' },
+    { path: 'mentions', select: 'username avatar' },
     { path: 'attachments' }
   ]);
 
   return message;
+};
+
+const escapeRegExp = (value) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+const resolveMentions = (content, groupMembers, requestedMentionIds, senderId) => {
+  if (!content?.trim() || !Array.isArray(groupMembers) || groupMembers.length === 0) return [];
+
+  const requestedIds = new Set((Array.isArray(requestedMentionIds) ? requestedMentionIds : []).map((entry) => entry.toString()));
+
+  return groupMembers
+    .filter((member) => {
+      const memberId = member._id.toString();
+      if (memberId === senderId.toString()) return false;
+      if (!requestedIds.has(memberId)) return false;
+      const mentionPattern = new RegExp(`(^|\\s)@${escapeRegExp(member.username)}(?=[\\s,!.?:;]|$)`, 'i');
+      return mentionPattern.test(content);
+    })
+    .map((member) => member._id);
 };
 
 const canAccessMessage = async (message, userId) => {
@@ -121,8 +143,15 @@ const createCallHistoryMessage = async ({ callerId, recipientId, mode, status, s
   return populateMessageDetails(message);
 };
 
+const serializeCallParticipant = (participant) => ({
+  _id: participant._id.toString(),
+  username: participant.username,
+  avatar: participant.avatar || ''
+});
+
 module.exports = (io) => {
   const activeCalls = new Map();
+  const activeGroupCalls = new Map();
 
   io.use(async (socket, next) => {
     try {
@@ -156,6 +185,8 @@ module.exports = (io) => {
     });
 
     socket.on('personal-message', async ({ recipientId, content = '', tempId, attachmentIds = [], sticker = '', location = null }) => {
+    
+    console.log('Received personal-message event:', { recipientId, content, tempId, attachmentIds, sticker, location });
       if (!(await hasConnection(user._id, recipientId))) {
         socket.emit('message-error', { tempId, error: 'You can only message accepted connections.' });
         return;
@@ -203,9 +234,9 @@ module.exports = (io) => {
       }
     });
 
-    socket.on('group-message', async ({ groupId, content = '', tempId, attachmentIds = [], sticker = '', location = null }) => {
-      const group = await Group.findById(groupId);
-      if (!group || !group.members.some((member) => member.toString() === user._id.toString())) return;
+    socket.on('group-message', async ({ groupId, content = '', tempId, attachmentIds = [], sticker = '', location = null, mentionIds = [] }) => {
+      const group = await Group.findById(groupId).populate('members', 'username avatar online socketId pushSubscriptions');
+      if (!group || !group.members.some((member) => member._id.toString() === user._id.toString())) return;
 
       let attachments = [];
       try {
@@ -215,12 +246,15 @@ module.exports = (io) => {
         return;
       }
 
+      const mentions = resolveMentions(content, group.members, mentionIds, user._id);
+
       const message = new Message({
         sender: user._id,
         group: groupId,
         content,
         sticker,
         location,
+        mentions,
         attachments: attachments.map((entry) => entry._id),
         type: determineMessageType({ content, sticker, attachments, location }),
         status: 'sent'
@@ -230,6 +264,20 @@ module.exports = (io) => {
 
       socket.to(groupId).emit('new-group-message', populatedMessage);
       socket.emit('message-sent', { tempId, messageId: message._id.toString(), message: populatedMessage });
+
+      if (mentions.length > 0) {
+        const mentionedUsers = group.members.filter((member) => mentions.some((mentionId) => mentionId.toString() === member._id.toString()));
+        await Promise.all(
+          mentionedUsers.map((member) =>
+            sendPushNotification(member, {
+              title: `${user.username} mentioned you`,
+              body: content || 'You were mentioned in a group message',
+              tag: `mention-${message._id}-${member._id}`,
+              url: '/chat'
+            })
+          )
+        );
+      }
     });
 
     socket.on('edit-message', async ({ messageId, content = '' }) => {
@@ -398,6 +446,128 @@ module.exports = (io) => {
       }
     });
 
+    socket.on('group-call-start', async ({ groupId, callId, type }) => {
+      if (!groupId || !callId || !['voice', 'video'].includes(type)) return;
+
+      const group = await Group.findById(groupId).populate('members', 'username avatar socketId pushSubscriptions');
+      if (!group || !group.members.some((member) => member._id.toString() === user._id.toString())) return;
+
+      const roomId = `group-call:${callId}`;
+      activeGroupCalls.set(callId, {
+        callId,
+        roomId,
+        groupId: group._id.toString(),
+        groupName: group.name,
+        hostId: user._id.toString(),
+        type,
+        participantIds: new Set([user._id.toString()])
+      });
+
+      socket.join(roomId);
+
+      const invitePayload = {
+        callId,
+        groupId: group._id.toString(),
+        groupName: group.name,
+        caller: {
+          _id: user._id.toString(),
+          username: user.username,
+          avatar: user.avatar || ''
+        },
+        type
+      };
+
+      const recipients = group.members.filter((member) => member._id.toString() !== user._id.toString());
+      recipients.forEach((member) => {
+        io.to(member._id.toString()).emit('group-call-invite', invitePayload);
+      });
+
+      await Promise.all(
+        recipients.map((member) =>
+          sendPushNotification(member, {
+            title: `${user.username} started a group call`,
+            body: `${type === 'video' ? 'Video' : 'Voice'} call in ${group.name}`,
+            tag: `group-call-${callId}-${member._id}`,
+            url: '/chat'
+          })
+        )
+      );
+    });
+
+    socket.on('group-call-join', async ({ callId }) => {
+      if (!callId) return;
+
+      const groupCall = activeGroupCalls.get(callId);
+      if (!groupCall) return;
+
+      const group = await Group.findById(groupCall.groupId).populate('members', 'username avatar');
+      if (!group || !group.members.some((member) => member._id.toString() === user._id.toString())) return;
+
+      const existingParticipantIds = [...groupCall.participantIds].filter((participantId) => participantId !== user._id.toString());
+      groupCall.participantIds.add(user._id.toString());
+      socket.join(groupCall.roomId);
+
+      const existingParticipants = await User.find({ _id: { $in: existingParticipantIds } }).select('username avatar');
+      socket.emit('group-call-joined', {
+        callId,
+        groupId: groupCall.groupId,
+        groupName: groupCall.groupName,
+        type: groupCall.type,
+        hostId: groupCall.hostId,
+        participants: existingParticipants.map(serializeCallParticipant)
+      });
+
+      socket.to(groupCall.roomId).emit('group-call-participant-joined', {
+        callId,
+        participant: serializeCallParticipant(user)
+      });
+    });
+
+    socket.on('group-call-offer', async ({ callId, recipientId, offer }) => {
+      if (!callId || !recipientId || !offer) return;
+      io.to(recipientId.toString()).emit('group-call-offer', {
+        callId,
+        sender: serializeCallParticipant(user),
+        offer
+      });
+    });
+
+    socket.on('group-call-answer', async ({ callId, recipientId, answer }) => {
+      if (!callId || !recipientId || !answer) return;
+      io.to(recipientId.toString()).emit('group-call-answer', {
+        callId,
+        sender: serializeCallParticipant(user),
+        answer
+      });
+    });
+
+    socket.on('group-call-ice-candidate', async ({ callId, recipientId, candidate }) => {
+      if (!callId || !recipientId || !candidate) return;
+      io.to(recipientId.toString()).emit('group-call-ice-candidate', {
+        callId,
+        sender: serializeCallParticipant(user),
+        candidate
+      });
+    });
+
+    socket.on('group-call-leave', ({ callId }) => {
+      if (!callId) return;
+      const groupCall = activeGroupCalls.get(callId);
+      if (!groupCall) return;
+
+      groupCall.participantIds.delete(user._id.toString());
+      socket.leave(groupCall.roomId);
+      socket.to(groupCall.roomId).emit('group-call-participant-left', {
+        callId,
+        participantId: user._id.toString()
+      });
+
+      if (groupCall.hostId === user._id.toString() || groupCall.participantIds.size === 0) {
+        io.to(groupCall.roomId).emit('group-call-ended', { callId });
+        activeGroupCalls.delete(callId);
+      }
+    });
+
     socket.on('call-request', async ({ recipientId, callId, type, offer }) => {
       if (!recipientId || !callId) return;
       if (!(await hasConnection(user._id, recipientId))) return;
@@ -512,6 +682,21 @@ module.exports = (io) => {
     });
 
     socket.on('disconnect', async () => {
+      for (const [callId, groupCall] of activeGroupCalls.entries()) {
+        if (!groupCall.participantIds.has(user._id.toString())) continue;
+
+        groupCall.participantIds.delete(user._id.toString());
+        socket.to(groupCall.roomId).emit('group-call-participant-left', {
+          callId,
+          participantId: user._id.toString()
+        });
+
+        if (groupCall.hostId === user._id.toString() || groupCall.participantIds.size === 0) {
+          io.to(groupCall.roomId).emit('group-call-ended', { callId });
+          activeGroupCalls.delete(callId);
+        }
+      }
+
       await User.findByIdAndUpdate(user._id, { online: false, socketId: null, lastSeen: new Date() });
       io.emit('user-status', { userId: user._id.toString(), online: false, lastSeen: new Date() });
     });
