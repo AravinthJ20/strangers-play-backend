@@ -3,6 +3,7 @@ const VerificationOtp = require('../models/VerificationOtp');
 const jwt = require('jsonwebtoken');
 const { frontendUrl, inviteSecret, jwtSecret } = require('../config/env');
 const { createMailTransport } = require('../utils/mail');
+const { uploadMediaBuffer } = require('../utils/mediaStorage');
 
 const createToken = (id) => jwt.sign({ _id: id.toString() }, jwtSecret, { expiresIn: '30d' });
 const createInviteToken = ({ inviterId, inviterName, email }) =>
@@ -11,6 +12,41 @@ const createInviteToken = ({ inviterId, inviterName, email }) =>
 const decodeInviteToken = (inviteToken) => jwt.verify(inviteToken, inviteSecret);
 const createOtp = () => `${Math.floor(100000 + Math.random() * 900000)}`;
 const OTP_EXPIRY_MINUTES = 10;
+const normalizeMimeType = (value) => `${value || ''}`.split(';')[0].trim().toLowerCase();
+
+const resolveAvatarValue = async ({ avatar, avatarMode, avatarUpload }) => {
+  const normalizedMode = avatarMode === 'upload' ? 'upload' : 'url';
+  const normalizedAvatar = typeof avatar === 'string' ? avatar.trim() : '';
+
+  if (normalizedMode === 'url') {
+    return normalizedAvatar;
+  }
+
+  if (!avatarUpload?.fileName || !avatarUpload?.mimeType || !avatarUpload?.dataUrl) {
+    return '';
+  }
+
+  const match = `${avatarUpload.dataUrl}`.match(/^data:(.+);base64,(.+)$/);
+  if (!match) {
+    throw new Error('Invalid avatar upload payload');
+  }
+
+  const [, encodedMimeType, base64Data] = match;
+  const normalizedMimeType = normalizeMimeType(avatarUpload.mimeType);
+  if (!normalizedMimeType || normalizeMimeType(encodedMimeType) !== normalizedMimeType) {
+    throw new Error('Avatar MIME type mismatch');
+  }
+
+  const buffer = Buffer.from(base64Data, 'base64');
+  const storedFile = await uploadMediaBuffer({
+    fileName: avatarUpload.fileName,
+    mimeType: normalizedMimeType,
+    buffer,
+    category: 'image'
+  });
+
+  return storedFile.publicUrl;
+};
 
 const sendOtpEmail = async ({ email, subject, headline, body, otp }) => {
   const transport = createMailTransport();
@@ -49,7 +85,7 @@ const sanitizeUser = (user) => {
 
 exports.requestRegistrationOtp = async (req, res) => {
   try {
-    const { username, email, password, inviteToken } = req.body;
+    const { username, email, password, inviteToken, avatar = '', avatarMode = 'url', avatarUpload = null } = req.body;
     if (!username || !email || !password) {
       return res.status(400).json({ error: 'Missing fields' });
     }
@@ -76,7 +112,20 @@ exports.requestRegistrationOtp = async (req, res) => {
       payload: {
         username: username.trim(),
         password,
-        inviteToken: inviteToken || ''
+        inviteToken: inviteToken || '',
+        avatar: typeof avatar === 'string' ? avatar.trim() : '',
+        avatarMode: avatarMode === 'upload' ? 'upload' : 'url',
+        avatarUpload: avatarMode === 'upload' && avatarUpload
+          ? {
+              fileName: avatarUpload.fileName || '',
+              mimeType: avatarUpload.mimeType || '',
+              dataUrl: avatarUpload.dataUrl || ''
+            }
+          : {
+              fileName: '',
+              mimeType: '',
+              dataUrl: ''
+            }
       }
     });
 
@@ -109,7 +158,7 @@ exports.register = async (req, res) => {
       return res.status(400).json({ error: 'OTP is invalid or expired' });
     }
 
-    const { username, password, inviteToken } = verification.payload;
+    const { username, password, inviteToken, avatar, avatarMode, avatarUpload } = verification.payload;
     let invitePayload = null;
     if (inviteToken) {
       invitePayload = decodeInviteToken(inviteToken);
@@ -121,7 +170,8 @@ exports.register = async (req, res) => {
     const existing = await User.findOne({ $or: [{ username }, { email: normalizedEmail }] });
     if (existing) return res.status(400).json({ error: 'User already exists' });
 
-    const user = new User({ username, email: normalizedEmail, password });
+    const resolvedAvatar = await resolveAvatarValue({ avatar, avatarMode, avatarUpload });
+    const user = new User({ username, email: normalizedEmail, password, avatar: resolvedAvatar });
     const token = createToken(user._id);
     user.tokens = [{ token }];
     await user.save();

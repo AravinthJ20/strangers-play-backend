@@ -41,6 +41,8 @@ const sanitizeDeletedMessage = (message) => {
   message.editedAt = null;
 };
 
+const normalizeMimeType = (value) => `${value || ''}`.split(';')[0].trim().toLowerCase();
+
 exports.uploadMedia = async (req, res) => {
   try {
     const { fileName, mimeType, dataUrl } = req.body;
@@ -54,15 +56,18 @@ exports.uploadMedia = async (req, res) => {
     }
 
     const [, encodedMimeType, base64Data] = match;
-    if (encodedMimeType !== mimeType) {
+    const normalizedMimeType = normalizeMimeType(mimeType);
+    const normalizedEncodedMimeType = normalizeMimeType(encodedMimeType);
+
+    if (!normalizedMimeType || normalizedEncodedMimeType !== normalizedMimeType) {
       return res.status(400).json({ error: 'MIME type mismatch' });
     }
 
     const buffer = Buffer.from(base64Data, 'base64');
-    const category = mimeType.startsWith('image/') ? 'image' : 'file';
+    const category = normalizedMimeType.startsWith('image/') ? 'image' : 'file';
     const storedFile = await uploadMediaBuffer({
       fileName,
-      mimeType,
+      mimeType: normalizedMimeType,
       buffer,
       category
     });

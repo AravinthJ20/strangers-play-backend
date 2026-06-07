@@ -8,7 +8,14 @@ const verificationOtpSchema = new mongoose.Schema({
   payload: {
     username: { type: String, trim: true, default: '' },
     password: { type: String, default: '' },
-    inviteToken: { type: String, default: '' }
+    inviteToken: { type: String, default: '' },
+    avatar: { type: String, default: '' },
+    avatarMode: { type: String, default: 'url' },
+    avatarUpload: {
+      fileName: { type: String, default: '' },
+      mimeType: { type: String, default: '' },
+      dataUrl: { type: String, default: '' }
+    }
   },
   createdAt: { type: Date, default: Date.now }
 });

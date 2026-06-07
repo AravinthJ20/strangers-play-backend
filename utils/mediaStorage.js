@@ -14,7 +14,10 @@ const generateFileName = (originalName) => {
   return `${Date.now()}-${crypto.randomBytes(6).toString('hex')}${extension}`;
 };
 
+const normalizeMimeType = (value) => `${value || ''}`.split(';')[0].trim().toLowerCase();
+
 const uploadLocal = async ({ fileName, mimeType, buffer }) => {
+  const normalizedMimeType = normalizeMimeType(mimeType);
   const generatedName = generateFileName(fileName);
   await ensureUploadsDir();
 
@@ -28,7 +31,7 @@ const uploadLocal = async ({ fileName, mimeType, buffer }) => {
     fileName: generatedName,
     storagePath: absolutePath,
     publicUrl: `/uploads/chat-media/${generatedName}`,
-    mimeType
+    mimeType: normalizedMimeType
   };
 };
 
@@ -52,9 +55,10 @@ const getCloudinaryClient = () => {
 
 const uploadCloudinary = async ({ fileName, mimeType, buffer, category }) => {
   const cloudinary = getCloudinaryClient();
+  const normalizedMimeType = normalizeMimeType(mimeType);
   const generatedName = generateFileName(fileName);
   const publicId = generatedName.replace(path.extname(generatedName), '');
-  const dataUri = `data:${mimeType};base64,${buffer.toString('base64')}`;
+  const dataUri = `data:${normalizedMimeType};base64,${buffer.toString('base64')}`;
 
   const uploadResult = await cloudinary.uploader.upload(dataUri, {
     folder: cloudinaryConfig.folder,
@@ -69,7 +73,7 @@ const uploadCloudinary = async ({ fileName, mimeType, buffer, category }) => {
     fileName: generatedName,
     storagePath: uploadResult.secure_url,
     publicUrl: uploadResult.secure_url,
-    mimeType: uploadResult.resource_type === 'raw' ? mimeType : uploadResult.format ? `${mimeType.split('/')[0]}/${uploadResult.format}` : mimeType
+    mimeType: uploadResult.resource_type === 'raw' ? normalizedMimeType : uploadResult.format ? `${normalizedMimeType.split('/')[0]}/${uploadResult.format}` : normalizedMimeType
   };
 };
 
