@@ -15,4 +15,8 @@ jobs:
           username: ubuntu
           key: ${{ secrets.EC2_SSH_KEY }}
           script: |
-            /home/ubuntu/.nvm/versions/node/v24.17.0/bin/pm2 restart strangers-play-backend
+            cd ~/strangers-play-backend
+
+            pm2 restart strangers-play-backend || pm2 start server.js --name strangers-play-backend
+
+            pm2 save
