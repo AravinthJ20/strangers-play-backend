@@ -1,7 +1,7 @@
 {
-  "name": "strangers-play-backend",
+  "name": "green-lynk-backend",
   "version": "1.0.0",
-  "description": "Real-time chat backend for Strangers Play",
+  "description": "Real-time chat backend for Green Lynk",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",

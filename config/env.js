@@ -41,8 +41,8 @@ const parseBoolean = (value, fallback = false) => {
 
 module.exports = {
   port: Number(process.env.PORT || 4000),
-  jwtSecret: process.env.JWT_SECRET || 'strangers-play-secret',
-  inviteSecret: process.env.INVITE_SECRET || process.env.JWT_SECRET || 'strangers-play-secret',
+  jwtSecret: process.env.JWT_SECRET || 'green-lynk-secret',
+  inviteSecret: process.env.INVITE_SECRET || process.env.JWT_SECRET || 'green-lynk-secret',
   frontendUrl: process.env.FRONTEND_URL || '',
   corsOrigins: parseOrigins(process.env.CORS_ORIGINS, process.env.CORS_ORIGIN, process.env.FRONTEND_URL),
   statusFeatureEnabled: parseBoolean(process.env.STATUS_FEATURE_ENABLED, true),
@@ -51,6 +51,6 @@ module.exports = {
     cloudName: process.env.CLOUDINARY_CLOUD_NAME || '',
     apiKey: process.env.CLOUDINARY_API_KEY || '',
     apiSecret: process.env.CLOUDINARY_API_SECRET || '',
-    folder: process.env.CLOUDINARY_FOLDER || 'strangers-play/chat-media'
+    folder: process.env.CLOUDINARY_FOLDER || 'green-lynk/chat-media'
   }
 };

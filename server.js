@@ -39,7 +39,7 @@ socketManager(io);
 startRequestReminderCron();
 
 app.get('/', (req, res) => {
-  res.json({ message: 'Strangers Play backend is running' });
+res.json({ message: 'Green Lynk backend is running' });
 });
 
 server.listen(port, () => console.log(`Backend listening on port ${port}`));

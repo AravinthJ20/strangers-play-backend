@@ -131,9 +131,9 @@ exports.requestRegistrationOtp = async (req, res) => {
 
     const mailStatus = await sendOtpEmail({
       email: normalizedEmail,
-      subject: 'Your Strangers Play registration OTP',
+      subject: 'Your Green Lynk registration OTP',
       headline: 'Verify your email to create your account',
-      body: 'Use this one-time password to complete your Strangers Play registration.',
+      body: 'Use this one-time password to complete your Green Lynk registration.',
       otp
     });
 
@@ -258,11 +258,11 @@ exports.sendInvite = async (req, res) => {
     await transport.sendMail({
       from: process.env.SMTP_FROM || process.env.SMTP_USER,
       to: normalizedEmail,
-      subject: `${req.user.username} invited you to join Strangers Play`,
-      text: `${req.user.username} invited you to join Strangers Play. Register here: ${inviteLink}`,
+      subject: `${req.user.username} invited you to join Green Lynk`,
+      text: `${req.user.username} invited you to join Green Lynk. Register here: ${inviteLink}`,
       html: `
         <div style="font-family:Segoe UI,Arial,sans-serif;line-height:1.5;color:#14213d">
-          <h2 style="margin-bottom:12px;">You are invited to Strangers Play</h2>
+              <h2 style="margin-bottom:12px;">You are invited to Green Lynk</h2>
           <p><strong>${req.user.username}</strong> invited you to join and connect.</p>
           <p>
             <a href="${inviteLink}" style="display:inline-block;padding:12px 18px;border-radius:10px;background:#2a9d8f;color:#ffffff;text-decoration:none;">
@@ -301,8 +301,8 @@ exports.requestPasswordResetOtp = async (req, res) => {
 
     const mailStatus = await sendOtpEmail({
       email: normalizedEmail,
-      subject: 'Your Strangers Play password reset OTP',
-      headline: 'Reset your Strangers Play password',
+      subject: 'Your Green Lynk password reset OTP',
+      headline: 'Reset your Green Lynk password',
       body: 'Use this one-time password to continue resetting your password.',
       otp
     });

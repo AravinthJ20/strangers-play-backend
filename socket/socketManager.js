@@ -4,7 +4,7 @@ const Message = require('../models/Message');
 const Group = require('../models/Group');
 const ChatMedia = require('../models/ChatMedia');
 const { sendPushNotification } = require('../utils/push');
-const JWT_SECRET = process.env.JWT_SECRET || 'strangers-play-secret';
+const JWT_SECRET = process.env.JWT_SECRET || 'green-lynk-secret';
   // const crypto=require("crypto")
   // const getSecretRoomId=({Id})=>{
   //  return crypto.createHash("sha256").update([Id].sort().join('_')).digest("hex")

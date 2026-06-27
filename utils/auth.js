@@ -1,6 +1,6 @@
 const jwt = require('jsonwebtoken');
 const User = require('../models/User');
-const JWT_SECRET = process.env.JWT_SECRET || 'strangers-play-secret';
+const JWT_SECRET = process.env.JWT_SECRET || 'green-lynk-secret';
 
 const auth = async (req, res, next) => {
   try {

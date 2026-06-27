@@ -14,11 +14,11 @@ const buildReminderCopy = (requestCount) => {
     title: 'People are interested in your profile',
     body: `${requestCount} ${peopleLabel} interested in your profile. Please make a decision.`,
     emailSubject: `You have ${requestCount} pending interest ${requestsLabel}`,
-    emailText: `${requestCount} ${peopleLabel} interested in your profile on Strangers Play. Please make a decision on the pending ${requestsLabel}.`,
+    emailText: `${requestCount} ${peopleLabel} interested in your profile on Green Lynk. Please make a decision on the pending ${requestsLabel}.`,
     emailHtml: `
       <div style="font-family:Segoe UI,Arial,sans-serif;line-height:1.6;color:#14213d">
         <h2 style="margin-bottom:12px;">People are interested in your profile</h2>
-        <p>${requestCount} ${peopleLabel} interested in your profile on Strangers Play.</p>
+      <p>${requestCount} ${peopleLabel} interested in your profile on Green Lynk.</p>
         <p>Please open the app and make a decision on the pending ${requestsLabel}.</p>
       </div>
     `

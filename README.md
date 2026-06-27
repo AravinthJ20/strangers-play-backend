@@ -1,4 +1,4 @@
-# Strangers Play Backend
+# Green Lynk Backend
 
 ## Setup
 
