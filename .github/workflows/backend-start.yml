@@ -1,0 +1,29 @@
+name: Start Server
+
+on:
+  workflow_dispatch:
+
+jobs:
+  start:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Start Application
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ubuntu
+          key: ${{ secrets.EC2_SSH_KEY }}
+          script: |
+            export NVM_DIR="$HOME/.nvm"
+            [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
+
+            cd ~/strangers-play-backend
+
+            node -v
+            npm -v
+            which pm2
+
+            pm2 restart strangers-play-backend || pm2 start server.js --name strangers-play-backend
+
+            pm2 save

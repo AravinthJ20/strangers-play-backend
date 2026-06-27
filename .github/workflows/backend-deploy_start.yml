@@ -1,0 +1,33 @@
+name: Deploy Backend
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Deploy to EC2
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ubuntu
+          key: ${{ secrets.EC2_SSH_KEY }}
+          script: |
+            cd ~/strangers-play-backend
+
+            echo "Pulling latest code..."
+            git pull origin main
+
+            echo "Installing packages..."
+            npm install
+
+            echo "Starting or restarting application..."
+            pm2 restart strangers-play-backend || pm2 start server.js --name strangers-play-backend
+
+            pm2 save
+
+            echo "Deployment completed"
